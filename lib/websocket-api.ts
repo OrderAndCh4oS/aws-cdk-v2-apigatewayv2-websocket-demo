@@ -1,9 +1,10 @@
 import { ITable } from "aws-cdk-lib/aws-dynamodb";
 import { IFunction } from "aws-cdk-lib/aws-lambda";
-import { CfnApi, CfnIntegration, CfnRoute, CfnStage, CfnDeployment } from "aws-cdk-lib/aws-apigatewayv2";
-import { ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import {CfnApi, CfnIntegration, CfnRoute, CfnStage, CfnDeployment, CfnAuthorizer} from "aws-cdk-lib/aws-apigatewayv2";
+import {PolicyDocument, Role, ServicePrincipal} from "aws-cdk-lib/aws-iam";
 import { Aws, Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
+import {Environment} from "../bin/environment";
 
 export interface WebsocketApiProps {
     readonly apiName: string;
@@ -12,6 +13,7 @@ export interface WebsocketApiProps {
     readonly connectHandler: IFunction;
     readonly disconnectHandler: IFunction;
     readonly connectionsTable: ITable;
+    readonly authorizationHandler: IFunction;
     readonly defaultHandler?: IFunction;
 }
 
@@ -20,7 +22,7 @@ export class WebsocketApi extends Construct {
     readonly api: CfnApi;
     readonly deployment: CfnDeployment;
 
-    constructor(parent: Stack, name: string, props: WebsocketApiProps) {
+    constructor(parent: Stack, name: string, props: WebsocketApiProps, envs: Environment) {
         super(parent, name);
         this.props = props;
 
@@ -28,8 +30,9 @@ export class WebsocketApi extends Construct {
             name: props.apiName,
             description: props.apiDescription,
             protocolType: "WEBSOCKET",
-            routeSelectionExpression: "$request.body.action",
+            routeSelectionExpression: "$request.body.action"
         });
+
         this.deployment = new CfnDeployment(this, "WebsocketDeployment", {
             apiId: this.api.ref,
         });
@@ -40,10 +43,36 @@ export class WebsocketApi extends Construct {
             deploymentId: this.deployment.ref,
         });
 
+        const role = new Role(this, 'AuthorisedRole', {
+            roleName: 'authorised-role',
+            assumedBy: new ServicePrincipal('apigateway.amazonaws.com'),
+            inlinePolicies: {
+                allowLambdaInvocation: PolicyDocument.fromJson({
+                    Version: '2012-10-17',
+                    Statement: [
+                        {
+                            Effect: 'Allow',
+                            Action: ['lambda:InvokeFunction', 'lambda:InvokeAsync'],
+                            Resource: `arn:aws:lambda:${envs.REGION}:${envs.ACCOUNT}:function:*`,
+                        },
+                    ],
+                }),
+            },
+        });
+
+        const authorizer = new CfnAuthorizer(this, 'WorkspaceAuthoriser', {
+            name: 'workspace-authoriser',
+            apiId: this.api.ref,
+            authorizerType: 'REQUEST',
+            identitySource: ['route.request.querystring.auth'],
+            authorizerUri: `arn:aws:apigateway:${envs.REGION}:lambda:path/2015-03-31/functions/${this.props.authorizationHandler.functionArn}/invocations`,
+            authorizerCredentialsArn: role.roleArn,
+        });
+        this.addLambdaIntegration(props.connectHandler, "$connect", "ConnectionRoute", false,"CUSTOM",  authorizer);
+
         props.connectionsTable.grantWriteData(props.connectHandler);
         props.connectionsTable.grantWriteData(props.disconnectHandler);
 
-        this.addLambdaIntegration(props.connectHandler, "$connect", "ConnectionRoute");
         this.addLambdaIntegration(props.disconnectHandler, "$disconnect", "DisconnectRoute");
 
         if(props.defaultHandler) {
@@ -52,11 +81,11 @@ export class WebsocketApi extends Construct {
         }
     }
 
-    addLambdaIntegration(handler: IFunction, routeKey: string, operationName: string, apiKeyRequired?: boolean, authorizationType?: string) {
+    addLambdaIntegration(handler: IFunction, routeKey: string, operationName: string, apiKeyRequired?: boolean, authorizationType?: string, authorizer?: CfnAuthorizer) {
         const integration = new CfnIntegration(this, `${operationName}Integration`, {
             apiId: this.api.ref,
             integrationType: "AWS_PROXY",
-            integrationUri: `arn:aws:apigateway:${Aws.REGION}:lambda:path/2015-03-31/functions/${handler.functionArn}/invocations`
+            integrationUri: `arn:aws:apigateway:${Aws.REGION}:lambda:path/2015-03-31/functions/${handler.functionArn}/invocations`,
         });
 
         handler.grantInvoke(new ServicePrincipal('apigateway.amazonaws.com', {
@@ -73,7 +102,8 @@ export class WebsocketApi extends Construct {
             apiKeyRequired,
             authorizationType: authorizationType || "NONE",
             operationName,
-            target: `integrations/${integration.ref}`
+            target: `integrations/${integration.ref}`,
+            authorizerId: authorizer?.attrAuthorizerId,
         }));
     }
 }

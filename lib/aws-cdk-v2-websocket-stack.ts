@@ -37,6 +37,16 @@ export class AwsCdkV2WebsocketStack extends cdk.Stack {
             }
         });
 
+        const authorizationHandler = new NodejsFunction(this, 'AuthorisationHandlerWebsocketDemo', {
+            ...commonHandlerProps,
+            entry: 'lambda/handlers/authorisation.ts',
+            environment: {
+                // Todo: use env
+                ISSUER: 'https://app-auth.eu.auth0.com/',
+                AUDIENCE: 'https://app-demo.com',
+            }
+        });
+
         const defaultHandler = new NodejsFunction(this, 'DefaultHandlerWebsocketDemo', {
             ...commonHandlerProps,
             entry: 'lambda/websocket/default.ts',
@@ -53,15 +63,21 @@ export class AwsCdkV2WebsocketStack extends cdk.Stack {
             }
         });
 
-        const websocketApi = new WebsocketApi(this, "MessageWebsocketApiWebsocketDemo", {
-            apiName: "messages-api",
-            apiDescription: "Web Socket API for Completions",
-            stageName: envs.STAGE,
-            connectHandler,
-            disconnectHandler,
-            defaultHandler,
-            connectionsTable
-        });
+        const websocketApi = new WebsocketApi(
+            this,
+            "MessageWebsocketApiWebsocketDemo",
+            {
+                apiName: "messages-api",
+                apiDescription: "Web Socket API for Completions",
+                stageName: envs.STAGE,
+                connectHandler,
+                disconnectHandler,
+                defaultHandler,
+                connectionsTable,
+                authorizationHandler
+            },
+            envs
+        );
 
         const CONNECTION_URL = `https://${websocketApi.api.ref}.execute-api.${Aws.REGION}.amazonaws.com/${envs.STAGE}`;
 
